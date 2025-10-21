@@ -8,7 +8,7 @@ node_modules/
 # Gradle
 .gradle/
 build/
-out/
+/out/
 !gradle/wrapper/gradle-wrapper.jar
 
 # IntelliJ
