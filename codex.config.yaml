@@ -1,0 +1,67 @@
+# Codex 기본 설정 파일
+# 위치: /codex.config.yaml
+
+version: "1.0"
+
+project:
+  name: "todo-service"
+  description: "Firebase 로그인 기반 Todo 서비스 (Spring Boot + Next.js)"
+
+context:
+  # Codex가 '참고'할 문서 (요구사항, 목표 등)
+  - path: docs/PRD.md
+    type: requirement
+    description: >
+      제품 요구사항 및 유저 스토리 정의.
+      Codex는 이 문서를 기반으로 비즈니스 로직과 데이터 모델을 추론합니다.
+
+agent:
+  # Codex가 '실행'할 문서 (지시서, 작업 명세)
+  path: docs/Agent.md
+  description: >
+    기술 명세 및 작업 단위(Task) 정의.
+    Codex는 이 문서의 TASK 블록을 기준으로 코드를 생성합니다.
+
+tasks:
+  - id: INIT-REPO
+    description: >
+      프로젝트 초기 구조 생성, monorepo 세팅, docker-compose/Flyway/Firebase 기본 설정.
+    auto_run: false
+
+  - id: API-TODO
+    description: >
+      Todo CRUD REST API 및 Firebase 인증 필터 구현.
+    auto_run: false
+
+  - id: UI-TODO
+    description: >
+      로그인 후 Todo UI 구현, 상태 필터, e2e 테스트 작성.
+    auto_run: false
+
+  - id: CI
+    description: >
+      GitHub Actions CI/CD 설정 (api/web 병렬 빌드 및 테스트).
+    auto_run: false
+
+execution:
+  default_task: INIT-REPO
+  commit_format: "feat({module}): {message}"
+  allow_context_refresh: true
+  auto_commit: true
+  auto_push: true
+
+notifications:
+  on_success: true
+  on_failure: true
+
+ci:
+  provider: github
+  pr_label: "codex-generated"
+  pr_template: |
+    ### 🤖 Codex 자동 생성 작업
+    - Task: {task_id}
+    - 기준 문서: [Agent.md](./docs/Agent.md)
+    - 요구사항: [PRD.md](./docs/PRD.md)
+    - 검증 완료: ✅/❌
+    ---
+    {details}
