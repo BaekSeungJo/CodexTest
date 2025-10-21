@@ -1,0 +1,31 @@
+# General
+.DS_Store
+node_modules/
+.env
+.env.local
+.env.*.local
+
+# Gradle
+.gradle/
+build/
+out/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IntelliJ
+.idea/
+*.iml
+
+# VSCode
+.vscode/
+
+# Next.js
+.next/
+.npm/
+
+# Logs
+logs/
+*.log
+
+# Docker
+infra/postgres-data/
+infra/adminer-data/
