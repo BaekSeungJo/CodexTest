@@ -1,267 +1,336 @@
-# Agent: Todo 서비스 (Spring Boot API + Next.js UI + Firebase Auth)
+# Agent: Todo 서비스 (Java 21 + Spring Boot 3.3.3 + Next.js + Firebase Auth)
 
-> 생성일: 2025-10-21 05:23:12
-
-본 문서는 **Codex 에이전트가 이 문서만 읽고 작업**하도록 설계된 실행형 지시서(Agent.md)입니다.
-모든 변경은 본 문서를 우선 수정한 뒤 Codex에 재실행을 요청하세요. (Single Source of Truth)
+> 생성일: 2025-10-21 07:10:50
+> 본 문서는 Codex가 **이 파일만 읽고** 작업할 수 있도록 작성된 실행형 지시서입니다. (Single Source of Truth)
 
 ---
 
 ## 0. Goal & Outcomes
 
-- 로그인한 사용자에게 **To-Do 리스트** 기능 제공 (생성/조회/수정/삭제/상태필터).
-- 2주 내 MVP 완성.
-- KPI
-  - 로그인 성공율 ≥ 99.5%
-  - API p95 응답시간 < 200ms (로컬/개발 기준)
-  - e2e 테스트 20개 이상 **그린**
+- 로그인 사용자 전용 **To-Do 리스트**(생성/조회/수정/삭제/상태필터) 제공
+- 2주 내 MVP
+- KPI: 로그인 성공율 ≥ 99.5%, API p95 < 200ms, e2e 20개 그린
 
 **Non-Goals**
-- 오프라인 동기화, 다중 프로젝트/보드, 공유/권한 모델은 범위 외.
-- 모바일 앱(네이티브)은 범위 외.
+
+- 오프라인 동기화, 공유 권한 모델, 네이티브 앱
 
 ---
 
-## 1. Architecture & Tech Choices
+## 1. Architecture & Tech Choices (업데이트됨)
 
 - **UI**: Next.js 14(App Router) + TypeScript, React Query, Firebase Auth(Email/Password, Google)
-- **API**: Java 17, Spring Boot 2.4.5 (또는 2.5.x 호환), 헥사고널 아키텍처(ports/adapters)
-- **DB**: PostgreSQL (로컬: Docker), JPA/Hibernate + Flyway
-- **Auth**: 클라이언트에서 Firebase ID Token 발급 → API에서 Firebase Admin SDK로 검증 → 내부 `userId` 컨텍스트 주입
-- **Test**: JUnit/MockMvc(Unit/Integration), Playwright(웹 e2e)
-- **CI**: GitHub Actions 예시 (빌드/테스트/도커 이미지)
+- **API**: **Java 21 (LTS), Spring Boot 3.3.3**, 헥사고널 아키텍처(ports/adapters)
+- **Build**: **Gradle 8.10+**
+- **DB**: PostgreSQL 14 (로컬: Docker), Spring Data JPA + Flyway
+- **Auth**: Firebase ID Token → API에서 Firebase Admin SDK 검증 → `userId` 컨텍스트
+- **Test**: **JUnit 5.10, Spring Boot Test, Testcontainers(Postgres)**, Playwright(e2e)
+- **CI**: GitHub Actions (Java 21 + Gradle 8.x + Node 20)
+- **Container**: **Dockerfile(api/web) + docker-compose.yml 예시 포함**
 
-**설계 원칙**
-- 경계 명확화: `domain`(순수) / `application`(use case) / `adapter`(in/out)
-- DTO/엔티티 구분, 검증은 `application` 레이어에서 수행
-- 에러 규약 통일(문서 하단 명세 참조)
+> Jakarta 변경 주의: `javax.*` → `jakarta.*`
 
 ---
 
-## 2. Repository Strategy & Layout (Monorepo)
+## 2. Repository Layout (Monorepo)
 
 ```
 /
-├─ api/                           # Spring Boot (Hexagonal)
-│  ├─ build.gradle
+├─ api/                           # Spring Boot
+│  ├─ build.gradle[.kts]
 │  ├─ src/main/java/...
 │  ├─ src/test/java/...
 │  └─ src/main/resources/db/migration  # Flyway V1__*.sql
 ├─ web/                           # Next.js (TS)
 │  ├─ package.json
-│  ├─ app/                        # App Router
-│  ├─ lib/                        # api client, hooks
-│  └─ e2e/                        # Playwright
+│  ├─ app/
+│  ├─ lib/
+│  └─ e2e/
 ├─ infra/
-│  ├─ docker-compose.yml          # postgres, adminer
-│  └─ firebase/                   # service-account.json (비공개, 샘플만)
+│  ├─ docker-compose.yml          # ★ 업데이트: Testcontainers 병행 사용
+│  ├─ api.Dockerfile              # ★ 추가
+│  └─ web.Dockerfile              # ★ 추가
 ├─ docs/
-│  └─ Agent.md                    # 이 파일
+│  └─ Agent.md
 └─ Makefile
 ```
 
-**브랜치 전략**
-- 기본: trunk-based (main) + 기능 브랜치
-- PR 머지 전 CI 필수 통과
+---
+
+## 3. API Spec (요약)
+
+- Base `/api`, Bearer Firebase ID Token
+- 401/403/422/500 규약 고정
+- 엔드포인트: POST/GET/PATCH/DELETE `/api/todos` (status=all|active|done)
 
 ---
 
-## 3. API Spec
+## 4. Domain & Validation
 
-### 3.1 공통
-- Base URL: `/api`
-- 인증: 헤더 `Authorization: Bearer <Firebase_ID_Token>`
-- 인증 실패(검증 실패/만료): `401 Unauthorized`
-- 권한 불충분(다른 사용자 데이터 접근): `403 Forbidden`
-- 유효성 위반: `422 Unprocessable Entity` (본문에 에러 코드/필드/메시지)
-- 서버 오류: `500 Internal Server Error`
-
-### 3.2 ToDo
-- **Entity 필드**
-  - `id: UUID`
-  - `userId: string`
-  - `title: string (1~100)`
-  - `dueDate: ISO8601 (nullable)`
-  - `done: boolean (default=false)`
-  - `createdAt, updatedAt: Instant`
-
-- **Endpoints**
-  - `POST /api/todos`
-    - body: `{ "title": "string", "dueDate": "ISO", "done": false }`
-    - 201 생성, Location 헤더
-  - `GET /api/todos?status=all|active|done&cursor=&size=`
-    - 기본 정렬: `createdAt desc`
-  - `PATCH /api/todos/{id}`
-    - body: 부분 업데이트 `{ "title"?, "dueDate"?, "done"? }`
-  - `DELETE /api/todos/{id}`
-    - 204
-
-**에러 페이로드 예시**
-```json
-{
-  "timestamp": "2025-10-21T06:00:00Z",
-  "path": "/api/todos",
-  "error": {
-    "code": "VALIDATION_FAILED",
-    "details": [{"field":"title","message":"must not be blank"}]
-  }
-}
-```
+- `Todo(id, userId, title(1~100), dueDate?, done=false, createdAt, updatedAt)`
+- userId 스코프 격리, DTO/엔티티 분리, UTC 저장
 
 ---
 
-## 4. Domain & Validation Rules (API)
+## 5. Acceptance Criteria
 
-- `title`: 공백 불가, 1~100자
-- `dueDate`: 과거/미래 모두 허용(리마인더 범위 외)
-- `userId` 단위 데이터 격리 (쿼리/리포지토리에서 항상 스코핑)
-- 영속 모델과 API DTO 분리
-- 시간은 UTC 보관, 클라이언트 표시 로컬화
-
----
-
-## 5. User Stories & Acceptance Criteria
-
-- **[AC-001]** 로그인 사용자는 To-Do를 생성/조회/수정/삭제할 수 있다.
-- **[AC-002]** 사용자는 자신의 To-Do만 볼 수 있다. (다른 사용자 데이터 접근 시 403)
-- **[AC-003]** 제목이 비면 422가 반환된다.
-- **[AC-004]** 상태 필터: all/active(done=false)/done(done=true) 동작.
-- **[AC-005]** e2e 시나리오: 로그인→추가→체크→필터→삭제가 정상 종료한다.
+- [AC-001] 로그인 사용자 To-Do CRUD 가능
+- [AC-002] 타 사용자 데이터 접근 시 403
+- [AC-003] 제목 공백 시 422
+- [AC-004] 상태 필터 동작
+- [AC-005] e2e: 로그인→추가→체크→필터→삭제
 
 ---
 
-## 6. Task Blocks (Codex 실행 단위)
-
-> Codex는 아래 작업을 **위에서 아래 순서대로** 실행합니다. 각 작업은 산출물과 테스트 기준을 반드시 충족해야 합니다.
+## 6. Task Blocks (Codex 실행 순서)
 
 ### TASK:INIT-REPO
-- **Goal**: 모노레포 스캐폴딩, 로컬 기동 성공
+
+- **Goal**: 최신 스택 기반 스캐폴딩 + 컨테이너 구성
 - **Outputs**
-  - `/api` Spring Boot 초기 프로젝트 (Hexagonal: `domain/`, `application/`, `adapter/in/web`, `adapter/out/persistence`, `config/`)
-  - `/web` Next.js 14 초기 프로젝트 + Firebase Auth(로그인/로그아웃 UI)
-  - `/infra/docker-compose.yml` (postgres:14, adminer:latest)
-  - `Makefile` (단축 명령), `.editorconfig`, `.gitignore`, `README.md`
-  - `/api/src/main/resources/application.yml` (기본 설정), Flyway baseline
-  - `/web/.env.example`, `/api/.env.example`
+  - Gradle 설정(**Java 21, Boot 3.3.3, Gradle 8.10+)**
+  - `infra/api.Dockerfile`, `infra/web.Dockerfile`, `infra/docker-compose.yml`
+  - Testcontainers 셋업(테스트 의존)
+  - Makefile, .editorconfig, .gitignore, README
 - **Tests**
-  - `make up` → postgres 가동
-  - `make api` → `/api/actuator/health` 가 `UP`
-  - `make web` → 홈 접속 및 로그인 화면 노출
+  - `make up`(선택) 또는 Testcontainers로 통합 테스트 통과
+  - `/api/actuator/health = UP`, `/web` 홈 노출
 
 ### TASK:API-TODO
-- **Goal**: Todo CRUD REST, Firebase 인증 검증 필터, JPA + Flyway
+
+- **Goal**: Todo CRUD + Firebase 인증 필터 + JPA/Flyway
 - **Outputs**
   - 엔티티/리포지토리/서비스/컨트롤러, 전역 예외 핸들러
-  - Firebase Admin SDK 연동(`FIREBASE_CREDENTIALS_PATH`)
-  - 단위/통합 테스트 (MockMvc)
+  - Firebase Admin SDK (`FIREBASE_CREDENTIALS_PATH`)
+  - **Testcontainers 기반 통합 테스트**
 - **Tests**
-  - 단위 10개+, 통합 8개+
-  - 401/403/422/200 케이스 포함
+  - 단위 10+, 통합 8+, 401/403/422/200 포함
 
 ### TASK:UI-TODO
-- **Goal**: 로그인 후 To-Do UI, 상태 필터, 낙관적 업데이트
+
+- **Goal**: 로그인 후 Todo UI, 상태 필터, 낙관적 업데이트
 - **Outputs**
-  - `/app/(auth)/login` 페이지
-  - `/app/todos` 페이지 (목록/추가/체크/삭제/필터)
-  - API 연동 hooks(`lib/api.ts`, `lib/auth.ts`), React Query 캐시
-  - Playwright e2e 테스트 10개+
-- **Tests**
-  - `npm run e2e` 녹색, 핵심 플로우 통과
+  - `/app/(auth)/login`, `/app/todos`, hooks(`lib/api.ts`, `lib/auth.ts`)
+  - Playwright e2e 10+
+- **Tests**: e2e 녹색
 
 ### TASK:CI
-- **Goal**: PR 시 빌드/테스트, main 머지 시 컨테이너 빌드
-- **Outputs**
-  - `.github/workflows/ci.yml` (api/web 병렬 빌드, 캐시)
-  - 품질 게이트(테스트 실패 시 머지 금지)
+
+- **Goal**: Java 21/Gradle 8.x/Node 20 캐시, 테스트/리포트
+- **Outputs**: `.github/workflows` 템플릿(이미 제공)
 
 ---
 
-## 7. DX & Runbook
+## 7. DX & Runbook (업데이트)
 
 ### 필수 도구
-- `docker`/`docker compose`, `node 20+`, `pnpm` 또는 `npm`, `java 17`, `gradle 7+`
+
+- `docker`/`docker compose`, `node 20+`, `pnpm` 또는 `npm`, **`java 21`**, **`gradle 8.10+`**
 
 ### 환경 변수
+
 - **web (.env)**
-  - `NEXT_PUBLIC_FIREBASE_API_KEY=`
-  - `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=`
-  - `NEXT_PUBLIC_FIREBASE_PROJECT_ID=`
+  - `NEXT_PUBLIC_FIREBASE_API_KEY=...`
+  - `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=...`
+  - `NEXT_PUBLIC_FIREBASE_PROJECT_ID=...`
 - **api (.env)**
   - `SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/todo`
   - `SPRING_DATASOURCE_USERNAME=todo`
   - `SPRING_DATASOURCE_PASSWORD=todo`
   - `FIREBASE_CREDENTIALS_PATH=infra/firebase/service-account.json`
 
-### Make 명령 예시
+### Make 예시
+
 ```
-make up         # postgres/adminer up
+make up         # docker compose up -d
 make down       # compose down -v
-make api        # api 실행 (./gradlew bootRun)
-make web        # web 실행 (npm run dev)
-make test-api   # api 테스트
-make test-web   # web 테스트(e2e 포함 시 별도 커맨드)
+make api        # ./gradlew bootRun
+make web        # npm run dev
+make test-api   # ./gradlew test
+make test-web   # npm run test && npm run e2e --if-present
 ```
 
-### 로컬 시나리오
-1) `cp web/.env.example web/.env` & 실제 Firebase 콘솔 값 기입  
-2) `cp api/.env.example api/.env` & service-account.json 경로 확인  
-3) `make up && make api && make web`  
-4) 브라우저에서 로그인 → `/app/todos` 기능 점검
+---
+
+## 8. Containerization 예시 (★ 추가)
+
+### 8.1 api.Dockerfile
+
+```dockerfile
+# infra/api.Dockerfile
+FROM eclipse-temurin:21-jdk AS build
+WORKDIR /app
+COPY api/ /app/
+RUN ./gradlew clean bootJar --no-daemon
+
+FROM eclipse-temurin:21-jre
+WORKDIR /opt/app
+COPY --from=build /app/build/libs/*.jar app.jar
+ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+EXPOSE 8080
+ENTRYPOINT ["sh","-c","java $JAVA_OPTS -jar app.jar"]
+```
+
+### 8.2 web.Dockerfile
+
+```dockerfile
+# infra/web.Dockerfile
+FROM node:20-bullseye AS deps
+WORKDIR /app
+COPY web/package*.json ./
+RUN npm ci
+
+FROM node:20-bullseye AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY web/ .
+RUN npm run build
+
+FROM node:20-bullseye
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app .
+EXPOSE 3000
+CMD ["npm","start"]
+```
+
+### 8.3 docker-compose.yml
+
+```yaml
+# infra/docker-compose.yml
+version: "3.9"
+services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: todo
+      POSTGRES_USER: todo
+      POSTGRES_PASSWORD: todo
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U todo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/api.Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/todo
+      SPRING_DATASOURCE_USERNAME: todo
+      SPRING_DATASOURCE_PASSWORD: todo
+      FIREBASE_CREDENTIALS_PATH: /run/secrets/service-account.json
+    depends_on: [db]
+    ports: ["8080:8080"]
+    secrets:
+      - service-account.json
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/web.Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8080
+    depends_on: [api]
+    ports: ["3000:3000"]
+
+secrets:
+  service-account.json:
+    file: ./firebase/service-account.json
+```
+
+> 로컬 개발은 Testcontainers만으로도 충분. 컨테이너 실행은 선택입니다.
 
 ---
 
-## 8. Commit/PR 규칙
+## 9. Testcontainers 예시 (★ 추가)
 
-- **Conventional Commits**
-  - `feat(api): add create-todo endpoint`
-  - `fix(web): sanitize title input`
-  - `test(api): add 422 cases for title`
-- **PR 템플릿 체크리스트**
-  - [ ] 빌드/테스트 통과
-  - [ ] 보안/시크릿 미노출
-  - [ ] 문서(README/Agent) 반영
-  - [ ] 수동 테스트 스크린샷(필요 시)
+### 9.1 Gradle 의존성 (api/build.gradle.kts 예시)
+
+```kotlin
+plugins {
+  id("org.springframework.boot") version "3.3.3"
+  id("io.spring.dependency-management") version "1.1.6"
+}
+
+java { toolchain { languageVersion.set(JavaLanguageVersion.of(21)) } }
+
+dependencies {
+  implementation("org.springframework.boot:spring-boot-starter-web")
+  implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+  implementation("org.flywaydb:flyway-core")
+  runtimeOnly("org.postgresql:postgresql")
+
+  testImplementation("org.springframework.boot:spring-boot-starter-test")
+  testImplementation("org.testcontainers:junit-jupiter")
+  testImplementation("org.testcontainers:postgresql")
+}
+```
+
+### 9.2 통합 테스트 샘플
+
+```java
+// src/test/java/.../TodoRepositoryIT.java
+package com.example.todo;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+@SpringBootTest
+@Testcontainers
+class TodoRepositoryIT {
+
+  @Container
+  static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:14")
+      .withDatabaseName("todo")
+      .withUsername("todo")
+      .withPassword("todo");
+
+  @DynamicPropertySource
+  static void registerProps(DynamicPropertyRegistry registry) {
+    registry.add("spring.datasource.url", postgres::getJdbcUrl);
+    registry.add("spring.datasource.username", postgres::getUsername);
+    registry.add("spring.datasource.password", postgres::getPassword);
+  }
+
+  @Test
+  void contextLoads() {
+    // given/when/then: 실제 CRUD 통합 테스트 작성
+  }
+}
+```
+
+### 9.3 application.yml (테스트 프로필 분리 예시)
+
+```yaml
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+```
 
 ---
 
-## 9. Testing Strategy
+## 10. Commit/PR 규칙 (유지)
 
-- **API**: JUnit5, MockMvc, Testcontainers(선택)
-- **Web**: Vitest(유닛), Playwright(e2e)
-- 커버리지 목표: unit ≥ 70%, 핵심 유스케이스 e2e 100%
-- CI에서 병렬화 및 캐시 적용
+- Conventional Commits
+- PR 체크리스트: 빌드/테스트/보안/문서 반영
 
 ---
 
-## 10. Error Handling & Logging
+## 11. Fallback & Escalation
 
-- 전역 예외 처리기: `@ControllerAdvice`
-- 에러 포맷 고정(위 명세)
-- 요청/응답 주요 ID, userId, 경로, 상태 코드 로깅(PII 마스킹)
-
----
-
-## 11. Security
-
-- Firebase Admin SDK 비공개 키는 레포에 커밋하지 않음
-- `.env`/시크릿 매니저 사용, 샘플만 커밋
-- CORS: 웹 오리진 화이트리스트
-
----
-
-## 12. Fallback & Escalation (Codex용)
-
-- 사양 모호/충돌 시:
-  1) **가정(Assumption)**을 기록: `docs/decisions/ADR-YYYYMMDD.md`
-  2) 해당 가정에 따라 작업을 진행
-  3) PR에 가정과 영향 범위를 요약
-- 외부 서비스 장애(Firebase 등)로 로컬 테스트 불가 시 mock/stub 사용 후 주석으로 명시
-
----
-
-## 13. Roadmap (차기 버전 후보)
-
-- 소셜 로그인 추가 범위 확대
-- 정렬/검색, 다중 리스트/보드
-- 알림/리마인더
-- 배포용 IaC(k8s), Observability(로그/메트릭/트레이싱)
+- 모호할 경우 `docs/decisions/ADR-*.md`에 가정 기록 후 진행
+- 외부 의존 장애 시 mock으로 우회, PR에 근거 기재
