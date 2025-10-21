@@ -1,12 +1,19 @@
 buildscript {
     repositories {
         maven {
-            url 'https://repo1.maven.org/maven2'
+            url 'https://repo.spring.io/release'
+        }
+        maven {
+            url 'http://repo1.maven.org/maven2'
+            allowInsecureProtocol = true
+        }
+        maven {
+            url 'https://mirrors.aliyun.com/repository/public/'
         }
     }
     dependencies {
-        classpath 'org.springframework.boot:spring-boot-gradle-plugin:2.5.15'
-        classpath 'io.spring.gradle:dependency-management-plugin:1.0.15.RELEASE'
+        classpath 'org.springframework.boot:spring-boot-gradle-plugin:3.3.3'
+        classpath 'io.spring.gradle:dependency-management-plugin:1.1.6'
     }
 }
 
@@ -16,7 +23,12 @@ apply plugin: 'io.spring.dependency-management'
 
 group = 'com.todo'
 version = '0.0.1-SNAPSHOT'
-sourceCompatibility = '17'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
@@ -28,7 +40,14 @@ tasks.withType(Test).configureEach {
 
 repositories {
     maven {
-        url 'https://repo1.maven.org/maven2'
+        url 'https://repo.spring.io/release'
+    }
+    maven {
+        url 'http://repo1.maven.org/maven2'
+        allowInsecureProtocol = true
+    }
+    maven {
+        url 'https://mirrors.aliyun.com/repository/public/'
     }
 }
 
@@ -43,8 +62,47 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+/**
+ * Task to automatically migrate javax.* imports to jakarta.* equivalents
+ * when upgrading legacy Spring Boot 2.x code.
+ */
+tasks.register('migrateJakarta') {
+    group = 'migration'
+    description = 'Convert javax.* imports to jakarta.* in Java source files.'
+
+    def sourceDirs = [
+        file('src/main/java'),
+        file('src/test/java')
+    ]
+
+    inputs.files(sourceDirs.collect { dir ->
+        fileTree(dir) {
+            include '**/*.java'
+        }
+    })
+
+    doLast {
+        sourceDirs.findAll { it.exists() }.each { dir ->
+            fileTree(dir) {
+                include '**/*.java'
+            }.visit { details ->
+                if (!details.directory) {
+                    def file = details.file
+                    def original = file.getText('UTF-8')
+                    def updated = original.replaceAll('javax\\.', 'jakarta.')
+                    if (original != updated) {
+                        file.write(updated, 'UTF-8')
+                    }
+                }
+            }
+        }
     }
+}
+
+tasks.named('compileJava').configure {
+    dependsOn 'migrateJakarta'
+}
+
+tasks.named('compileTestJava').configure {
+    dependsOn 'migrateJakarta'
 }
